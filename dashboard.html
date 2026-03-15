@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Adaptive Honeypot Dashboard</title>
+<style>
+  body { font-family: "Segoe UI", Arial, sans-serif; background:#0d1117; color:#e6edf3; margin:0; }
+  header { background:#161b22; padding:14px 20px; text-align:center; font-size:1.4em; color:#58a6ff; }
+  .top-row { display:flex; gap:20px; padding:12px; align-items:stretch; background:#21262d; border-bottom:1px solid #30363d; }
+  .card { flex:1; background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; text-align:center; }
+  .card h3 { margin:6px 0; color:#58a6ff; font-size:1em; }
+  .card p { margin:0; font-size:1.1em; }
+  .main { display:flex; gap:18px; padding:18px; }
+  .left { flex:2; }
+  .right { flex:1; max-width:360px; }
+  #chart { height:220px; background:#0d1117; border:1px solid #30363d; border-radius:8px; position:relative; padding:12px; }
+  .bar { position:absolute; bottom:10px; background:#58a6ff; color:#000; border-radius:6px 6px 0 0; text-align:center; font-weight:600; padding-top:6px; }
+  .log-container { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:12px; max-height:52vh; overflow-y:auto; }
+  .log-line { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:6px 10px; margin-bottom:8px; background:#0f1419; border-left:3px solid #58a6ff; border-radius:4px; font-family:monospace; }
+  .badge { background:#0b1220; border:1px solid rgba(88,166,255,0.15); padding:4px 8px; border-radius:12px; font-size:0.85em; color:#58a6ff; }
+  .attack-badge { padding:4px 8px; border-radius:10px; font-weight:700; font-size:0.8em; color:#fff; }
+  .high { background:#e74c3c; }
+  .medium { background:#f39c12; }
+  .low { background:#2ecc71; }
+  .small-list { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:10px; margin-bottom:12px; }
+  .small-list h4 { margin:0 0 8px 0; color:#58a6ff; }
+  footer { text-align:center; padding:10px; color:#8b949e; border-top:1px solid #30363d; margin-top:12px; }
+  @media(max-width:900px){ .main{flex-direction:column} .right{max-width:none} }
+</style>
+<script>
+// Numeric code to attack name map
+const attackMap = {
+  1:"back",2:"buffer_overflow",3:"ftp_write",4:"guess_passwd",5:"imap",
+  6:"ipsweep",7:"land",8:"loadmodule",9:"multihop",10:"neptune",
+  11:"nmap",12:"normal",13:"perl",14:"phf",15:"pod",
+  16:"portsweep",17:"rootkit",18:"satan",19:"smurf",20:"teardrop",
+  21:"warezclient"
+};
+
+function getSeverity(attack) {
+  const a = attack.toLowerCase();
+  if (["neptune","satan","smurf","teardrop","warezclient","back"].includes(a)) return "high";
+  if (["portsweep","ipsweep","nmap","guess_passwd"].includes(a)) return "medium";
+  return "low";
+}
+
+async function fetchLogs() {
+  try {
+    const res = await fetch('logs/demo.log', {cache: "no-store"});
+    const text = await res.text();
+    const lines = text.trim().split('\n').filter(l=>l);
+    const logContainer = document.getElementById('log-content');
+    logContainer.innerHTML = '';
+
+    const ipCounts = {};
+    const attackCounts = {};
+    let attackCount = 0;
+
+    const recent = lines.slice(-200);
+    recent.reverse();
+    recent.forEach(line => {
+      const srcMatch = line.match(/SRC=([\d\.]+)/i);
+      const src = srcMatch ? srcMatch[1] : 'unknown';
+      const attackMatch = line.match(/(?:ATTACK|attack)=([^ \t]+)/i);
+      let attack = attackMatch ? attackMatch[1].replace(/[.,;:]$/,'') : 'unknown';
+
+      // convert numeric code to name if exists
+      if (/^\d+$/.test(attack) && attackMap[attack]) {
+        attack = `${attack} (${attackMap[attack]})`;
+      }
+
+      ipCounts[src] = (ipCounts[src] || 0) + 1;
+      attackCounts[attack] = (attackCounts[attack] || 0) + 1;
+      if (!attack.toLowerCase().includes("normal")) attackCount++;
+
+      const el = document.createElement('div');
+      el.className = 'log-line';
+
+      const left = document.createElement('div');
+      left.style.display = 'flex';
+      left.style.gap = '12px';
+      left.style.alignItems = 'center';
+      left.innerHTML = `<span style="color:#9fb4d6">${line.split(' ')[0]}</span> <span class="badge">SRC=${src}</span>`;
+
+      const right = document.createElement('div');
+      const badge = document.createElement('span');
+      const plainAttack = attack.split('(')[1]?.replace(')','') || attack;
+      badge.className = `attack-badge ${getSeverity(plainAttack)}`;
+      badge.textContent = attack;
+      right.appendChild(badge);
+
+      el.appendChild(left);
+      el.appendChild(right);
+      logContainer.appendChild(el);
+    });
+
+    document.getElementById('totalLogs').textContent = lines.length;
+    document.getElementById('uniqueIPs').textContent = Object.keys(ipCounts).length;
+    document.getElementById('attackCount').textContent = attackCount;
+
+    renderChart(ipCounts);
+    renderAttackTypes(attackCounts);
+
+  } catch (err) {
+    console.error("fetchLogs error:", err);
+    document.getElementById('log-content').innerHTML = "<div style='padding:12px;color:#ff8080;'>Unable to load logs/demo.log — check path & server.</div>";
+  }
+}
+
+function renderChart(ipCounts){
+  const chart = document.getElementById('chart');
+  chart.innerHTML = '';
+  const items = Object.entries(ipCounts).sort((a,b)=>b[1]-a[1]).slice(0,5);
+  if(items.length===0){
+    chart.innerHTML = "<div style='color:#8b949e;padding:16px;text-align:center;'>No IP data</div>";
+    return;
+  }
+  const max = items[0][1];
+  const width = chart.clientWidth;
+  const barSpacing = 12;
+  const barWidth = Math.max(60, (width - (items.length+1)*barSpacing) / items.length);
+
+  items.forEach((it,idx)=>{
+    const ip=it[0], count=it[1];
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const left = barSpacing + idx*(barWidth + barSpacing);
+    bar.style.left = left+'px';
+    bar.style.width = barWidth+'px';
+    const height = Math.max(24, (count/max) * (chart.clientHeight - 40));
+    bar.style.height = height + 'px';
+    bar.innerHTML = `<div style="padding:6px 4px;font-size:0.85em;color:#001a33">${ip}</div><div style="font-size:0.9em;padding-top:6px;color:#001a33;background:rgba(255,255,255,0.0);height:24px;font-weight:700">${count}</div>`;
+    chart.appendChild(bar);
+  });
+}
+
+function renderAttackTypes(attackCounts){
+  const panel = document.getElementById('attack-types');
+  panel.innerHTML = '';
+  const items = Object.entries(attackCounts).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  if(items.length===0){
+    panel.innerHTML = "<div style='color:#8b949e'>No attacks yet</div>";
+    return;
+  }
+  items.forEach(([att,c])=>{
+    const plainAttack = att.split('(')[1]?.replace(')','') || att;
+    const sev = getSeverity(plainAttack);
+    const color = sev === 'high' ? '#e74c3c' : sev === 'medium' ? '#f39c12' : '#2ecc71';
+    const row = document.createElement('div');
+    row.style.display='flex';
+    row.style.justifyContent='space-between';
+    row.style.padding='6px 4px';
+    row.style.borderBottom='1px dashed rgba(255,255,255,0.02)';
+    row.innerHTML = `<div style="font-weight:600;color:${color}">${att}</div><div style="color:#9fb4d6">${c}</div>`;
+    panel.appendChild(row);
+  });
+}
+async function fetchActions() {
+  try {
+    const res = await fetch('logs/actions.log', {cache:"no-store"});
+    const text = await res.text();
+    const lines = text.trim().split('\n').filter(l=>l);
+    const panel = document.getElementById('actions-panel');
+    panel.innerHTML = '';
+    if (lines.length === 0) {
+      panel.innerHTML = "<em>No actions yet</em>";
+      return;
+    }
+    lines.slice(-10).reverse().forEach(line => {
+      const d = document.createElement('div');
+      d.textContent = line;
+      panel.appendChild(d);
+    });
+  } catch (err) {
+    // ignore if log file not found yet
+  }
+}
+setInterval(fetchActions, 3000);
+
+window.addEventListener('load', ()=>{
+  fetchLogs();
+  setInterval(fetchLogs, 2000);
+});
+</script>
+</head>
+<body>
+<header>🛡 Adaptive Honeypot — Live Dashboard</header>
+
+<div class="top-row">
+  <div class="card"><h3>Total Logs</h3><p id="totalLogs">0</p></div>
+  <div class="card"><h3>Unique Attackers</h3><p id="uniqueIPs">0</p></div>
+  <div class="card"><h3>Detected Attacks</h3><p id="attackCount">0</p></div>
+</div>
+
+<div class="main">
+  <div class="left">
+    <div style="margin-bottom:12px"><h3 style="color:#58a6ff;margin:6px 0">Top Attacker IPs</h3>
+      <div id="chart"></div>
+    </div>
+
+    <div class="log-container" id="log-content">
+      <p style="color:#8b949e">Waiting for live logs...</p>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="small-list">
+      <h4>Top Attack Types</h4>
+      <div id="attack-types" style="max-height:32vh;overflow-y:auto"></div>
+    </div>
+      <!-- ✨ New Panel: Adaptive Actions Log -->
+    <div class="small-list">
+      <h4>Recent Adaptive Actions</h4>
+      <div id="actions-panel" style="max-height:25vh;overflow-y:auto;color:#9fb4d6;font-size:0.9em;">
+        <em>Waiting for adaptive actions...</em>
+      </div>
+    </div>
+
+
+    <div class="small-list">
+      <h4>Quick Actions</h4>
+      <div style="color:#9fb4d6;font-size:0.95em">
+        • Serve logs from project root (<code>python3 -m http.server 8000</code>)<br>
+        • Ensure <code>logs/demo.log</code> is being appended by streamer/controller<br>
+        • To test: <code>echo "1 SRC=192.168.56.50 ATTACK=21" >> logs/demo.log</code>
+      </div>
+    </div>
+    <!-- Export Logs button -->
+  <div style="margin-top:10px;text-align:center;">
+    <button onclick="downloadLogs()" style="padding:8px 12px;border-radius:8px;border:1px solid rgba(88,166,255,0.18);background:#0b1220;color:#58a6ff;cursor:pointer;font-weight:600;">
+      Export Logs
+    </button>
+  </div>
+
+  <script>
+  function downloadLogs() {
+    const a = document.createElement('a');
+    a.href = 'logs/demo.log';
+    a.download = 'attack_logs.txt';
+    a.click();
+  }
+  </script>
+
+  </div>
+</div>
+
+<footer>&copy; 2025 Adaptive Honeypot Project</footer>
+</body>
+</html>
+
